@@ -1,0 +1,56 @@
+name: Scrape TikTok Video Details
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: "TikTok username, for example: khaby.lame, @khaby.lame, or https://www.tiktok.com/@khaby.lame"
+        required: true
+        type: string
+
+jobs:
+  scrape:
+    name: Extract TikTok video details
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+
+      - name: Normalize input
+        id: normalize
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RAW_INPUT='${{ inputs.username }}'
+
+          USERNAME="$(printf '%s' "$RAW_INPUT" \
+            | sed -E 's#https?://(www\.)?tiktok\.com/@##' \
+            | sed -E 's#/.*$##' \
+            | sed 's#^@##' \
+            | sed 's#/$##')"
+
+          if [ -z "$USERNAME" ]; then
+            echo "Error: username is empty after normalization."
+            exit 1
+          fi
+
+          PROFILE_URL
