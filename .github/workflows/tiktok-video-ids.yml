@@ -1,18 +1,19 @@
 name: Scrape TikTok Video IDs
 
-# The workflow_dispatch event allows us to trigger this manually from the GitHub UI.
 on:
   workflow_dispatch:
     inputs:
       username:
-        description: 'TikTok Username (e.g., khaby.lame or @khaby.lame)'
+        description: "TikTok username, for example: khaby.lame, @khaby.lame, or https://www.tiktok.com/@khaby.lame"
         required: true
         type: string
 
 jobs:
-  scrape-ids:
+  scrape:
+    name: Extract TikTok video IDs
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 15
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,40 +21,54 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # A stable, modern Python version
+          python-version: "3.12"
 
-      - name: Install Dependencies
-        # Trade-off explanation: By running pip install -U (upgrade), 
-        # we ensure we get the absolute latest patch of yt-dlp. 
-        # This is critical for scraping scripts.
+      - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install -U yt-dlp
+          python -m pip install --upgrade pip
+          pip install --upgrade -r requirements.txt
 
-      - name: Scrape Video IDs
-        # SECURITY NOTE: We map the GitHub input to an environment variable.
-        # NEVER inject ${{ inputs.username }} directly into a bash run script, 
-        # as a malicious user could type something like: user; rm -rf /
+      - name: Extract video IDs
         env:
           TARGET_USER: ${{ inputs.username }}
         run: |
-          # Clean the input: remove the '@' if the user accidentally included it
-          FORMATTED_USER=$(echo "$TARGET_USER" | sed 's/^@//')
-          OUTPUT_FILE="${FORMATTED_USER}_video_ids.txt"
-          
-          echo "Starting extraction for @$FORMATTED_USER..."
-          
-          # The requested command. 
-          # --flat-playlist: Extracts the metadata/IDs without requesting video files.
-          # --print-to-file id: Appends just the extracted ID to our text file.
-          yt-dlp --get-id --flat-playlist --print-to-file id "$OUTPUT_FILE" "https://www.tiktok.com/@$FORMATTED_USER"
-          
-          echo "Extraction complete. Check the artifacts for $OUTPUT_FILE."
+          set -euo pipefail
 
-      - name: Upload IDs as Artifact
-        # This step packages the resulting file and attaches it to the GitHub Action run.
+          # Normalize input.
+          # Accepts:
+          #   khaby.lame
+          #   @khaby.lame
+          #   https://www.tiktok.com/@khaby.lame
+          FORMATTED_USER="$(printf '%s' "$TARGET_USER" \
+            | sed 's#https://www.tiktok.com/@##' \
+            | sed 's#http://www.tiktok.com/@##' \
+            | sed 's#https://tiktok.com/@##' \
+            | sed 's#http://tiktok.com/@##' \
+            | sed 's#/$##' \
+            | sed 's/^@//')"
+
+          if [ -z "$FORMATTED_USER" ]; then
+            echo "Error: username is empty after normalization."
+            exit 1
+          fi
+
+          OUTPUT_FILE="${FORMATTED_USER}_video_ids.txt"
+          PROFILE_URL="https://www.tiktok.com/@${FORMATTED_USER}"
+
+          echo "Extracting public video IDs from: $PROFILE_URL"
+
+          # --flat-playlist avoids downloading videos or fetching full metadata.
+          # --print id outputs only the video IDs.
+          yt-dlp --flat-playlist --print id "$PROFILE_URL" > "$OUTPUT_FILE"
+
+          echo "Extraction complete."
+          echo "Output file: $OUTPUT_FILE"
+          echo "Number of IDs found:"
+          wc -l "$OUTPUT_FILE"
+
+      - name: Upload video IDs as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tiktok-video-ids-${{ inputs.username }}
-          path: '*_video_ids.txt'
-          retention-days: 7 # Keeps your GitHub storage clean by deleting old artifacts
+          name: tiktok-video-ids
+          path: "*_video_ids.txt"
+          retention-days: 7
