@@ -1,0 +1,4 @@
+# requirements.txt
+# We leave this unpinned so that we can force-upgrade to the latest 
+# release within our GitHub Action. TikTok changes its DOM frequently!
+yt-dlp
