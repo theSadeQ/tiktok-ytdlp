@@ -42,7 +42,7 @@ Supported input formats:
 When the workflow finishes:
 1. Open the completed workflow run.
 2. Scroll to the **Artifacts** section.
-3. Download the artifact named `tiktok-video-ids`.
+3. Download the artifact named `tiktok-video-ids-[username]`.
 
 Inside the downloaded ZIP file, you will find a text file like `khaby.lame_video_ids.txt`. Each line contains one video ID.
 
@@ -51,37 +51,15 @@ A TikTok video ID can usually be turned into a URL like this:
 `https://www.tiktok.com/@USERNAME/video/VIDEO_ID`
 
 ## Notes and Limitations
-This project depends on `yt-dlp` and TikTok being accessible from GitHub Actions.
-Sometimes TikTok may block or rate-limit GitHub's shared IP addresses. If that happens, the workflow may fail even if the code is correct.
+*   **Public Videos Only:** This tool only extracts public video IDs. Private, deleted, or region-restricted videos will not appear.
+*   **API Changes:** TikTok frequently changes its internal APIs and extraction logic. Keeping `yt-dlp` unpinned in the requirements helps ensure you are using the latest fixes.
+*   **Rate Limiting:** Sometimes TikTok may block or rate-limit GitHub's shared IP addresses. If that happens, the workflow may fail even if the code is correct.
 
-Possible fixes:
+Possible fixes if it fails:
 - run the workflow again later
 - update `yt-dlp`
 - test locally from your own machine
 - reduce how frequently you run the workflow
 
 
----
-
-### 4. `.gitignore`
-
-Create this file in the project root:
-
-```gitignore
-# Python cache
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Generated output files
-*_video_ids.txt
-
-# OS/editor files
-.DS_Store
-.idea/
-.vscode/
+Your refactoring of the documentation and pipeline logic demonstrates a great understanding of system resilience and user experience. Well done!
