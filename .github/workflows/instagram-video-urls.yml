@@ -1,0 +1,219 @@
+name: Scrape Instagram Video URLs
+
+on:
+  workflow_dispatch:
+    inputs:
+      usernames:
+        description: "Comma-separated Instagram usernames. Example: user1,user2,@user3,https://www.instagram.com/user4/"
+        required: true
+        type: string
+
+jobs:
+  scrape:
+    name: Extract Instagram video URLs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          pip install --upgrade yt-dlp
+
+      - name: Prepare Instagram cookies
+        shell: bash
+        env:
+          INSTAGRAM_COOKIES_BASE64: ${{ secrets.INSTAGRAM_COOKIES_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          # Instagram often blocks unauthenticated scraping.
+          # If you add a repository secret named INSTAGRAM_COOKIES_BASE64,
+          # this step will decode it into cookies.txt for yt-dlp.
+          #
+          # The secret should contain a base64-encoded Netscape cookies.txt file.
+          #
+          # If the secret is empty, the workflow will continue without cookies.
+
+          if [ -n "${INSTAGRAM_COOKIES_BASE64:-}" ]; then
+            echo "$INSTAGRAM_COOKIES_BASE64" | base64 --decode > cookies.txt
+            chmod 600 cookies.txt
+            echo "Instagram cookies file created."
+          else
+            echo "No Instagram cookies secret found. Continuing without cookies."
+          fi
+
+      - name: Extract Instagram video URLs for multiple users
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RAW_INPUT="${{ inputs.usernames }}"
+          OUTPUT_DIR="outputs"
+
+          mkdir -p "$OUTPUT_DIR"
+
+          IFS=',' read -ra USER_LIST <<< "$RAW_INPUT"
+
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+
+          for RAW_USER in "${USER_LIST[@]}"; do
+            # Normalize input into a clean Instagram username.
+            #
+            # Supported inputs:
+            #   username
+            #   @username
+            #   https://www.instagram.com/username/
+            #   https://instagram.com/username/?hl=en
+            #
+            # Why this matters:
+            # We want all user inputs to become one stable format:
+            #   username
+            USERNAME="$(printf '%s' "$RAW_USER" \
+              | xargs \
+              | sed -E 's#^https?://(www\.)?instagram\.com/##' \
+              | sed -E 's#^\@##' \
+              | sed -E 's#[/?#].*$##' \
+              | sed -E 's#/$##' \
+              | xargs)"
+
+            if [ -z "$USERNAME" ]; then
+              echo "Skipping empty username entry: '$RAW_USER'"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              continue
+            fi
+
+            PROFILE_URL="https://www.instagram.com/$USERNAME/"
+            OUTPUT_FILE="$OUTPUT_DIR/${USERNAME}_video_urls.txt"
+            TEMP_RAW_FILE="$(mktemp)"
+            TEMP_URLS_FILE="$(mktemp)"
+
+            echo "----------------------------------------"
+            echo "Processing username: $USERNAME"
+            echo "Profile URL: $PROFILE_URL"
+            echo "Output file: $OUTPUT_FILE"
+
+            COOKIE_ARGS=()
+            if [ -f "cookies.txt" ]; then
+              COOKIE_ARGS=(--cookies cookies.txt)
+            fi
+
+            # Extract URLs using yt-dlp in flat-playlist mode.
+            #
+            # Why --flat-playlist?
+            # It asks yt-dlp to list profile entries without downloading media.
+            #
+            # Why webpage_url?
+            # For Instagram, the useful identifier is usually the shortcode URL:
+            #   https://www.instagram.com/p/SHORTCODE/
+            #   https://www.instagram.com/reel/SHORTCODE/
+            #
+            # We use --ignore-errors so one unavailable/private item does not
+            # stop the whole profile extraction.
+            if ! yt-dlp \
+              --ignore-errors \
+              --flat-playlist \
+              --no-warnings \
+              "${COOKIE_ARGS[@]}" \
+              --print "%(webpage_url)s" \
+              "$PROFILE_URL" > "$TEMP_RAW_FILE"; then
+
+              echo "Error: yt-dlp failed to extract URLs for '$USERNAME'"
+              rm -f "$TEMP_RAW_FILE" "$TEMP_URLS_FILE"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              continue
+            fi
+
+            # Clean and keep only Instagram post/reel URLs.
+            #
+            # Instagram profile extraction can sometimes output empty lines,
+            # duplicate lines, or non-post URLs depending on yt-dlp behavior.
+            #
+            # We keep:
+            #   /p/
+            #   /reel/
+            #   /tv/
+            #
+            # /tv/ is older Instagram video format, but keeping it is useful.
+            grep -E '^https?://(www\.)?instagram\.com/(p|reel|tv)/[^/?#]+/?' "$TEMP_RAW_FILE" \
+              | sed -E 's#\?.*$##' \
+              | sed -E 's#/$#/#' \
+              | sort -u > "$TEMP_URLS_FILE" || true
+
+            if [ ! -s "$TEMP_URLS_FILE" ]; then
+              echo "Warning: no Instagram video/post URLs found for '$USERNAME'"
+              echo "This can happen if the profile is private, blocked, empty, or requires login cookies."
+              rm -f "$TEMP_RAW_FILE" "$TEMP_URLS_FILE"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              continue
+            fi
+
+            mv "$TEMP_URLS_FILE" "$OUTPUT_FILE"
+
+            COUNT="$(wc -l < "$OUTPUT_FILE" | tr -d '[:space:]')"
+            echo "Saved $COUNT Instagram URLs to $OUTPUT_FILE"
+
+            rm -f "$TEMP_RAW_FILE"
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+          done
+
+          echo "----------------------------------------"
+          echo "Finished processing."
+          echo "Successful users: $SUCCESS_COUNT"
+          echo "Failed/skipped users: $FAIL_COUNT"
+
+          if [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo "Error: no users were processed successfully."
+            exit 1
+          fi
+
+      - name: Commit and push output files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          shopt -s nullglob
+          FILES=(outputs/*.txt)
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "No output files found to commit."
+            exit 0
+          fi
+
+          git add outputs/*.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Add Instagram video URLs for multiple users"
+          git push
+
+      - name: Upload output as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-video-urls
+          path: outputs/*.txt
+          retention-days: 7
+
