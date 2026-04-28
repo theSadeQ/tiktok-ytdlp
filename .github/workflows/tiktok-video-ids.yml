@@ -10,13 +10,17 @@ on:
 
 jobs:
   scrape:
-    name: Extract TikTok video IDs
+    name: Extract TikTok video URLs
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,43 +28,82 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install --upgrade -r requirements.txt
+          pip install yt-dlp
 
-      - name: Extract video IDs
-        env:
-          TARGET_USER: ${{ inputs.username }}
+      - name: Extract video URLs
+        shell: bash
         run: |
           set -euo pipefail
 
-          # Normalize input.
-          # Accepts: khaby.lame, @khaby.lame, https://www.tiktok.com/@khaby.lame
-          FORMATTED_USER="$(printf '%s' "$TARGET_USER" \
-            | sed -E 's#https?://(www\.)?tiktok\.com/@##' \
-            | sed 's#/$##' \
-            | sed 's/^@//')"
+          RAW_INPUT='${{ inputs.username }}'
 
-          if [ -z "$FORMATTED_USER" ]; then
+          # Normalize input:
+          # - accept username
+          # - accept @username
+          # - accept full profile URL
+          USERNAME="$(printf '%s' "$RAW_INPUT" \
+            | sed -E 's#https?://(www\.)?tiktok\.com/@##' \
+            | sed -E 's#/.*$##' \
+            | sed 's#^@##' \
+            | sed 's#/$##')"
+
+          if [ -z "$USERNAME" ]; then
             echo "Error: username is empty after normalization."
             exit 1
           fi
 
-          OUTPUT_FILE="${FORMATTED_USER}_video_ids.txt"
-          PROFILE_URL="https://www.tiktok.com/@${FORMATTED_USER}"
+          PROFILE_URL="https://www.tiktok.com/@$USERNAME"
+          OUTPUT_DIR="outputs"
+          OUTPUT_FILE="$OUTPUT_DIR/${USERNAME}_video_urls.txt"
+          TEMP_IDS_FILE="$(mktemp)"
 
-          echo "Extracting public video IDs from: $PROFILE_URL"
+          mkdir -p "$OUTPUT_DIR"
 
-          yt-dlp --flat-playlist --print id "$PROFILE_URL" > "$OUTPUT_FILE"
-
-          echo "Extraction complete."
+          echo "Resolved username: $USERNAME"
+          echo "Profile URL: $PROFILE_URL"
           echo "Output file: $OUTPUT_FILE"
-          echo "Number of IDs found:"
-          wc -l "$OUTPUT_FILE"
 
-      - name: Upload video IDs as artifact
+          # Get flat playlist IDs only
+          yt-dlp --flat-playlist --print id "$PROFILE_URL" > "$TEMP_IDS_FILE"
+
+          if [ ! -s "$TEMP_IDS_FILE" ]; then
+            echo "Error: no video IDs were extracted."
+            exit 1
+          fi
+
+          # Convert each ID into a full TikTok video URL
+          sed "s#^#https://www.tiktok.com/@$USERNAME/video/#" "$TEMP_IDS_FILE" > "$OUTPUT_FILE"
+
+          COUNT="$(wc -l < "$OUTPUT_FILE" | tr -d '[:space:]')"
+          echo "Saved $COUNT video URLs to $OUTPUT_FILE"
+
+          rm -f "$TEMP_IDS_FILE"
+
+      - name: Commit and push output file to repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add outputs/*.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Add TikTok video URLs for ${{ inputs.username }}"
+          git push
+
+      - name: Upload output as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tiktok-video-ids-${{ inputs.username }}
-          path: "*_video_ids.txt"
+          name: tiktok-video-urls-${{ inputs.username }}
+          path: outputs/*.txt
           retention-days: 7
