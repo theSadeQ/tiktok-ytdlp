@@ -1,4 +1,4 @@
-name: Scrape TikTok Video deatail IDs
+name: Scrape TikTok Videos With Metadata
 
 on:
   workflow_dispatch:
@@ -10,9 +10,9 @@ on:
 
 jobs:
   scrape:
-    name: Extract TikTok video IDs
+    name: Extract TikTok video IDs, URLs, and metadata
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     permissions:
       contents: write
@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install yt-dlp
         shell: bash
         run: |
           set -euo pipefail
@@ -36,10 +36,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --upgrade yt-dlp
 
-          echo "yt-dlp version:"
+          echo "Installed yt-dlp version:"
           python -m yt_dlp --version
 
-      - name: Extract video URLs
+      - name: Extract TikTok video data
         id: extract
         shell: bash
         run: |
@@ -59,63 +59,87 @@ jobs:
           fi
 
           PROFILE_URL="https://www.tiktok.com/@${USERNAME}"
+
           OUTPUT_DIR="outputs"
-          OUTPUT_FILE="${OUTPUT_DIR}/${USERNAME}_video_urls.txt"
-          TEMP_IDS_FILE="$(mktemp)"
+          IDS_FILE="${OUTPUT_DIR}/${USERNAME}_video_ids.txt"
+          URLS_FILE="${OUTPUT_DIR}/${USERNAME}_video_urls.txt"
+          METADATA_FILE="${OUTPUT_DIR}/${USERNAME}_metadata.jsonl"
 
           mkdir -p "$OUTPUT_DIR"
 
           echo "Raw input: $RAW_INPUT"
           echo "Normalized username: $USERNAME"
           echo "Profile URL: $PROFILE_URL"
-          echo "Output file: $OUTPUT_FILE"
+          echo "IDs file: $IDS_FILE"
+          echo "URLs file: $URLS_FILE"
+          echo "Metadata file: $METADATA_FILE"
+
+          echo "Extracting video IDs..."
 
           python -m yt_dlp \
             --flat-playlist \
             --print id \
             "$PROFILE_URL" \
-            > "$TEMP_IDS_FILE"
+            > "$IDS_FILE"
 
-          if [ ! -s "$TEMP_IDS_FILE" ]; then
+          if [ ! -s "$IDS_FILE" ]; then
             echo "Error: No video IDs were extracted."
-            rm -f "$TEMP_IDS_FILE"
             exit 1
           fi
 
-          sed "s#^#https://www.tiktok.com/@${USERNAME}/video/#" "$TEMP_IDS_FILE" > "$OUTPUT_FILE"
+          echo "Creating full video URLs..."
 
-          URL_COUNT="$(wc -l < "$OUTPUT_FILE" | tr -d ' ')"
-          echo "Extracted $URL_COUNT video URLs."
+          sed "s#^#https://www.tiktok.com/@${USERNAME}/video/#" "$IDS_FILE" > "$URLS_FILE"
 
-          rm -f "$TEMP_IDS_FILE"
+          echo "Extracting full metadata for each video..."
+
+          python -m yt_dlp \
+            --dump-json \
+            "$PROFILE_URL" \
+            > "$METADATA_FILE"
+
+          if [ ! -s "$METADATA_FILE" ]; then
+            echo "Error: No metadata was extracted."
+            exit 1
+          fi
+
+          ID_COUNT="$(wc -l < "$IDS_FILE" | tr -d ' ')"
+          META_COUNT="$(wc -l < "$METADATA_FILE" | tr -d ' ')"
+
+          echo "Extracted $ID_COUNT video IDs."
+          echo "Extracted $META_COUNT metadata records."
 
           echo "username=$USERNAME" >> "$GITHUB_OUTPUT"
-          echo "output_file=$OUTPUT_FILE" >> "$GITHUB_OUTPUT"
+          echo "ids_file=$IDS_FILE" >> "$GITHUB_OUTPUT"
+          echo "urls_file=$URLS_FILE" >> "$GITHUB_OUTPUT"
+          echo "metadata_file=$METADATA_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and push output file to repository
+      - name: Commit and push output files
         shell: bash
         run: |
           set -euo pipefail
 
-          OUTPUT_FILE="${{ steps.extract.outputs.output_file }}"
           USERNAME="${{ steps.extract.outputs.username }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add "$OUTPUT_FILE"
+          git add outputs/
 
           if git diff --staged --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "Add TikTok video URLs for ${USERNAME}"
+          git commit -m "Add TikTok video metadata for ${USERNAME}"
           git push
 
-      - name: Upload output as artifact
+      - name: Upload output files as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tiktok-video-urls-${{ steps.extract.outputs.username }}
-          path: ${{ steps.extract.outputs.output_file }}
+          name: tiktok-video-data-${{ steps.extract.outputs.username }}
+          path: |
+            ${{ steps.extract.outputs.ids_file }}
+            ${{ steps.extract.outputs.urls_file }}
+            ${{ steps.extract.outputs.metadata_file }}
           retention-days: 7
