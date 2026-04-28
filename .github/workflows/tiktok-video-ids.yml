@@ -1,0 +1,59 @@
+name: Scrape TikTok Video IDs
+
+# The workflow_dispatch event allows us to trigger this manually from the GitHub UI.
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'TikTok Username (e.g., khaby.lame or @khaby.lame)'
+        required: true
+        type: string
+
+jobs:
+  scrape-ids:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # A stable, modern Python version
+
+      - name: Install Dependencies
+        # Trade-off explanation: By running pip install -U (upgrade), 
+        # we ensure we get the absolute latest patch of yt-dlp. 
+        # This is critical for scraping scripts.
+        run: |
+          pip install -r requirements.txt
+          pip install -U yt-dlp
+
+      - name: Scrape Video IDs
+        # SECURITY NOTE: We map the GitHub input to an environment variable.
+        # NEVER inject ${{ inputs.username }} directly into a bash run script, 
+        # as a malicious user could type something like: user; rm -rf /
+        env:
+          TARGET_USER: ${{ inputs.username }}
+        run: |
+          # Clean the input: remove the '@' if the user accidentally included it
+          FORMATTED_USER=$(echo "$TARGET_USER" | sed 's/^@//')
+          OUTPUT_FILE="${FORMATTED_USER}_video_ids.txt"
+          
+          echo "Starting extraction for @$FORMATTED_USER..."
+          
+          # The requested command. 
+          # --flat-playlist: Extracts the metadata/IDs without requesting video files.
+          # --print-to-file id: Appends just the extracted ID to our text file.
+          yt-dlp --get-id --flat-playlist --print-to-file id "$OUTPUT_FILE" "https://www.tiktok.com/@$FORMATTED_USER"
+          
+          echo "Extraction complete. Check the artifacts for $OUTPUT_FILE."
+
+      - name: Upload IDs as Artifact
+        # This step packages the resulting file and attaches it to the GitHub Action run.
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiktok-video-ids-${{ inputs.username }}
+          path: '*_video_ids.txt'
+          retention-days: 7 # Keeps your GitHub storage clean by deleting old artifacts
