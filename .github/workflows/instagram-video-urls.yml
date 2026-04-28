@@ -8,11 +8,27 @@ on:
         required: true
         type: string
 
+      max_posts:
+        description: "Maximum recent posts to scan per user"
+        required: false
+        default: "50"
+        type: string
+
+      output_type:
+        description: "Type of URL to save"
+        required: false
+        default: "permalink"
+        type: choice
+        options:
+          - permalink
+          - direct
+          - both
+
 jobs:
   scrape:
     name: Extract Instagram video URLs
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     permissions:
       contents: write
@@ -34,171 +50,362 @@ jobs:
           set -euo pipefail
 
           python -m pip install --upgrade pip
-          pip install --upgrade yt-dlp
-
-      - name: Prepare Instagram cookies
-        shell: bash
-        env:
-          INSTAGRAM_COOKIES_BASE64: ${{ secrets.INSTAGRAM_COOKIES_BASE64 }}
-        run: |
-          set -euo pipefail
-
-          # Instagram often blocks unauthenticated scraping.
-          # If you add a repository secret named INSTAGRAM_COOKIES_BASE64,
-          # this step will decode it into cookies.txt for yt-dlp.
-          #
-          # The secret should contain a base64-encoded Netscape cookies.txt file.
-          #
-          # If the secret is empty, the workflow will continue without cookies.
-
-          if [ -n "${INSTAGRAM_COOKIES_BASE64:-}" ]; then
-            echo "$INSTAGRAM_COOKIES_BASE64" | base64 --decode > cookies.txt
-            chmod 600 cookies.txt
-            echo "Instagram cookies file created."
-          else
-            echo "No Instagram cookies secret found. Continuing without cookies."
-          fi
+          pip install --upgrade instaloader
 
       - name: Extract Instagram video URLs for multiple users
         shell: bash
+        env:
+          RAW_USERNAMES: ${{ inputs.usernames }}
+          MAX_POSTS: ${{ inputs.max_posts }}
+          OUTPUT_TYPE: ${{ inputs.output_type }}
+
+          # Recommended authentication method:
+          # Base64 of your local Instaloader session file.
+          INSTAGRAM_SESSION_BASE64: ${{ secrets.INSTAGRAM_SESSION_BASE64 }}
+          INSTAGRAM_SESSION_USERNAME: ${{ secrets.INSTAGRAM_SESSION_USERNAME }}
+
+          # Fallback authentication method.
+          # This can fail if Instagram asks for 2FA/challenge verification.
+          INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
+          INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
         run: |
           set -euo pipefail
 
-          RAW_INPUT="${{ inputs.usernames }}"
-          OUTPUT_DIR="outputs"
+          mkdir -p outputs
 
-          mkdir -p "$OUTPUT_DIR"
+          cat > scrape_instagram.py <<'PY'
+          import base64
+          import os
+          import re
+          import sys
+          import time
+          from pathlib import Path
 
-          IFS=',' read -ra USER_LIST <<< "$RAW_INPUT"
+          import instaloader
+          from instaloader.exceptions import (
+              BadCredentialsException,
+              ConnectionException,
+              LoginRequiredException,
+              PrivateProfileNotFollowedException,
+              ProfileNotExistsException,
+              QueryReturnedNotFoundException,
+              TwoFactorAuthRequiredException,
+          )
 
-          SUCCESS_COUNT=0
-          FAIL_COUNT=0
 
-          for RAW_USER in "${USER_LIST[@]}"; do
-            # Normalize input into a clean Instagram username.
-            #
-            # Supported inputs:
-            #   username
-            #   @username
-            #   https://www.instagram.com/username/
-            #   https://instagram.com/username/?hl=en
-            #
-            # Why this matters:
-            # We want all user inputs to become one stable format:
-            #   username
-            USERNAME="$(printf '%s' "$RAW_USER" \
-              | xargs \
-              | sed -E 's#^https?://(www\.)?instagram\.com/##' \
-              | sed -E 's#^\@##' \
-              | sed -E 's#[/?#].*$##' \
-              | sed -E 's#/$##' \
-              | xargs)"
+          def normalize_username(raw: str) -> str:
+              """
+              Convert supported input formats into a clean Instagram username.
 
-            if [ -z "$USERNAME" ]; then
-              echo "Skipping empty username entry: '$RAW_USER'"
-              FAIL_COUNT=$((FAIL_COUNT + 1))
-              continue
-            fi
+              Supported:
+              - username
+              - @username
+              - https://www.instagram.com/username/
+              - https://instagram.com/username/?hl=en
+              """
+              value = raw.strip()
 
-            PROFILE_URL="https://www.instagram.com/$USERNAME/"
-            OUTPUT_FILE="$OUTPUT_DIR/${USERNAME}_video_urls.txt"
-            TEMP_RAW_FILE="$(mktemp)"
-            TEMP_URLS_FILE="$(mktemp)"
+              value = re.sub(
+                  r"^https?://(www\.)?instagram\.com/",
+                  "",
+                  value,
+                  flags=re.IGNORECASE,
+              )
 
-            echo "----------------------------------------"
-            echo "Processing username: $USERNAME"
-            echo "Profile URL: $PROFILE_URL"
-            echo "Output file: $OUTPUT_FILE"
+              value = value.lstrip("@")
+              value = re.split(r"[/?#]", value)[0]
+              value = value.strip()
 
-            COOKIE_ARGS=()
-            if [ -f "cookies.txt" ]; then
-              COOKIE_ARGS=(--cookies cookies.txt)
-            fi
+              return value
 
-            # Extract URLs using yt-dlp in flat-playlist mode.
-            #
-            # Why --flat-playlist?
-            # It asks yt-dlp to list profile entries without downloading media.
-            #
-            # Why webpage_url?
-            # For Instagram, the useful identifier is usually the shortcode URL:
-            #   https://www.instagram.com/p/SHORTCODE/
-            #   https://www.instagram.com/reel/SHORTCODE/
-            #
-            # We use --ignore-errors so one unavailable/private item does not
-            # stop the whole profile extraction.
-            if ! yt-dlp \
-              --ignore-errors \
-              --flat-playlist \
-              --no-warnings \
-              "${COOKIE_ARGS[@]}" \
-              --print "%(webpage_url)s" \
-              "$PROFILE_URL" > "$TEMP_RAW_FILE"; then
 
-              echo "Error: yt-dlp failed to extract URLs for '$USERNAME'"
-              rm -f "$TEMP_RAW_FILE" "$TEMP_URLS_FILE"
-              FAIL_COUNT=$((FAIL_COUNT + 1))
-              continue
-            fi
+          def make_post_permalink(shortcode: str) -> str:
+              """
+              Instagram post/reel URLs are both accessible through /p/{shortcode}/.
+              This is more stable than trying to guess /reel/ versus /p/.
+              """
+              return f"https://www.instagram.com/p/{shortcode}/"
 
-            # Clean and keep only Instagram post/reel URLs.
-            #
-            # Instagram profile extraction can sometimes output empty lines,
-            # duplicate lines, or non-post URLs depending on yt-dlp behavior.
-            #
-            # We keep:
-            #   /p/
-            #   /reel/
-            #   /tv/
-            #
-            # /tv/ is older Instagram video format, but keeping it is useful.
-            grep -E '^https?://(www\.)?instagram\.com/(p|reel|tv)/[^/?#]+/?' "$TEMP_RAW_FILE" \
-              | sed -E 's#\?.*$##' \
-              | sed -E 's#/$#/#' \
-              | sort -u > "$TEMP_URLS_FILE" || true
 
-            if [ ! -s "$TEMP_URLS_FILE" ]; then
-              echo "Warning: no Instagram video/post URLs found for '$USERNAME'"
-              echo "This can happen if the profile is private, blocked, empty, or requires login cookies."
-              rm -f "$TEMP_RAW_FILE" "$TEMP_URLS_FILE"
-              FAIL_COUNT=$((FAIL_COUNT + 1))
-              continue
-            fi
+          def safe_get_direct_video_url(post):
+              """
+              Direct CDN video URLs may expire and may require authentication.
+              Therefore this is optional and wrapped safely.
+              """
+              try:
+                  return post.video_url
+              except Exception:
+                  return None
 
-            mv "$TEMP_URLS_FILE" "$OUTPUT_FILE"
 
-            COUNT="$(wc -l < "$OUTPUT_FILE" | tr -d '[:space:]')"
-            echo "Saved $COUNT Instagram URLs to $OUTPUT_FILE"
+          def login_if_possible(loader: instaloader.Instaloader) -> bool:
+              """
+              Prefer a saved Instaloader session over username/password login.
 
-            rm -f "$TEMP_RAW_FILE"
-            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-          done
+              Why?
+              GitHub Actions is a non-browser environment. Instagram may block
+              fresh username/password logins with 2FA, challenge checks, or rate limits.
+              A pre-created session file is usually more reliable.
+              """
+              session_b64 = os.getenv("INSTAGRAM_SESSION_BASE64", "").strip()
+              session_username = os.getenv("INSTAGRAM_SESSION_USERNAME", "").strip()
 
-          echo "----------------------------------------"
-          echo "Finished processing."
-          echo "Successful users: $SUCCESS_COUNT"
-          echo "Failed/skipped users: $FAIL_COUNT"
+              instagram_username = os.getenv("INSTAGRAM_USERNAME", "").strip()
+              instagram_password = os.getenv("INSTAGRAM_PASSWORD", "").strip()
 
-          if [ "$SUCCESS_COUNT" -eq 0 ]; then
-            echo "Error: no users were processed successfully."
-            exit 1
-          fi
+              if session_b64 and session_username:
+                  session_path = Path(".instaloader-session")
+                  session_path.write_bytes(base64.b64decode(session_b64))
+
+                  loader.load_session_from_file(
+                      username=session_username,
+                      filename=str(session_path),
+                  )
+
+                  print(f"Loaded Instagram session for: {session_username}")
+                  return True
+
+              if instagram_username and instagram_password:
+                  print(f"Trying username/password login for: {instagram_username}")
+
+                  try:
+                      loader.login(instagram_username, instagram_password)
+                      print("Instagram login succeeded.")
+                      return True
+                  except TwoFactorAuthRequiredException:
+                      print(
+                          "Instagram login failed: two-factor authentication is required. "
+                          "Use INSTAGRAM_SESSION_BASE64 instead."
+                      )
+                      return False
+                  except BadCredentialsException:
+                      print("Instagram login failed: bad username or password.")
+                      return False
+                  except Exception as exc:
+                      print(f"Instagram login failed: {exc}")
+                      return False
+
+              print(
+                  "No Instagram authentication provided. "
+                  "Continuing anonymously. This may fail or return limited results."
+              )
+              return False
+
+
+          def write_video_line(handle, output_type: str, permalink: str, direct_url: str | None):
+              """
+              Write output in a predictable format.
+
+              permalink:
+                One stable Instagram post URL per line.
+
+              direct:
+                One direct CDN video URL per line when available.
+
+              both:
+                TSV format: permalink<TAB>direct_url
+              """
+              if output_type == "permalink":
+                  handle.write(permalink + "\n")
+
+              elif output_type == "direct":
+                  if direct_url:
+                      handle.write(direct_url + "\n")
+
+              elif output_type == "both":
+                  handle.write(f"{permalink}\t{direct_url or ''}\n")
+
+              else:
+                  raise ValueError(f"Unsupported output_type: {output_type}")
+
+
+          def scrape_user(loader: instaloader.Instaloader, username: str, max_posts: int, output_type: str) -> int:
+              output_file = Path("outputs") / f"{username}_instagram_video_urls.txt"
+
+              print("----------------------------------------")
+              print(f"Processing Instagram user: {username}")
+              print(f"Output file: {output_file}")
+              print(f"Max posts to scan: {max_posts}")
+              print(f"Output type: {output_type}")
+
+              video_count = 0
+              scanned_count = 0
+              seen_lines = set()
+
+              try:
+                  profile = instaloader.Profile.from_username(loader.context, username)
+
+                  with output_file.open("w", encoding="utf-8") as handle:
+                      for post in profile.get_posts():
+                          scanned_count += 1
+
+                          if scanned_count > max_posts:
+                              break
+
+                          permalink = make_post_permalink(post.shortcode)
+
+                          # Normal single video/reel post.
+                          if post.is_video:
+                              direct_url = safe_get_direct_video_url(post)
+
+                              before = handle.tell()
+                              write_video_line(handle, output_type, permalink, direct_url)
+                              after = handle.tell()
+
+                              if after > before:
+                                  video_count += 1
+
+                          # Carousel posts can contain one or more videos.
+                          if post.typename == "GraphSidecar":
+                              try:
+                                  for index, node in enumerate(post.get_sidecar_nodes(), start=1):
+                                      if not getattr(node, "is_video", False):
+                                          continue
+
+                                      sidecar_permalink = f"{permalink}?img_index={index}"
+                                      direct_url = getattr(node, "video_url", None)
+
+                                      line_key = (sidecar_permalink, direct_url or "")
+                                      if line_key in seen_lines:
+                                          continue
+                                      seen_lines.add(line_key)
+
+                                      before = handle.tell()
+                                      write_video_line(
+                                          handle,
+                                          output_type,
+                                          sidecar_permalink,
+                                          direct_url,
+                                      )
+                                      after = handle.tell()
+
+                                      if after > before:
+                                          video_count += 1
+
+                              except Exception as exc:
+                                  print(f"Warning: could not inspect sidecar post {post.shortcode}: {exc}")
+
+                  print(f"Finished {username}: scanned {scanned_count} posts, found {video_count} videos.")
+
+                  return video_count
+
+              except ProfileNotExistsException:
+                  print(f"Error: profile does not exist: {username}")
+                  return -1
+
+              except PrivateProfileNotFollowedException:
+                  print(f"Error: profile is private and the authenticated account does not follow it: {username}")
+                  return -1
+
+              except LoginRequiredException:
+                  print(f"Error: login is required to access this profile: {username}")
+                  return -1
+
+              except QueryReturnedNotFoundException:
+                  print(f"Error: Instagram returned not found for: {username}")
+                  return -1
+
+              except ConnectionException as exc:
+                  print(f"Error: Instagram connection/query error for {username}: {exc}")
+                  return -1
+
+              except Exception as exc:
+                  print(f"Unexpected error while processing {username}: {exc}")
+                  return -1
+
+
+          def main() -> int:
+              raw_usernames = os.getenv("RAW_USERNAMES", "")
+              output_type = os.getenv("OUTPUT_TYPE", "permalink").strip().lower()
+
+              try:
+                  max_posts = int(os.getenv("MAX_POSTS", "50"))
+              except ValueError:
+                  print("MAX_POSTS must be a number.")
+                  return 1
+
+              if max_posts <= 0:
+                  print("MAX_POSTS must be greater than zero.")
+                  return 1
+
+              if output_type not in {"permalink", "direct", "both"}:
+                  print("OUTPUT_TYPE must be one of: permalink, direct, both")
+                  return 1
+
+              usernames = [
+                  normalize_username(item)
+                  for item in raw_usernames.split(",")
+                  if normalize_username(item)
+              ]
+
+              if not usernames:
+                  print("No valid usernames were provided.")
+                  return 1
+
+              loader = instaloader.Instaloader(
+                  download_pictures=False,
+                  download_videos=False,
+                  download_video_thumbnails=False,
+                  download_geotags=False,
+                  download_comments=False,
+                  save_metadata=False,
+                  compress_json=False,
+                  quiet=True,
+              )
+
+              login_if_possible(loader)
+
+              successful_profiles = 0
+              failed_profiles = 0
+              total_videos = 0
+
+              for username in usernames:
+                  result = scrape_user(loader, username, max_posts, output_type)
+
+                  if result >= 0:
+                      successful_profiles += 1
+                      total_videos += result
+                  else:
+                      failed_profiles += 1
+
+                  # Small delay to reduce the chance of rate-limiting.
+                  time.sleep(3)
+
+              print("----------------------------------------")
+              print(f"Successful profiles: {successful_profiles}")
+              print(f"Failed profiles: {failed_profiles}")
+              print(f"Total videos found: {total_videos}")
+
+              if successful_profiles == 0:
+                  print("Error: no profiles were processed successfully.")
+                  return 1
+
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
+
+          python scrape_instagram.py
 
       - name: Commit and push output files
         shell: bash
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          shopt -s nullglob
-          FILES=(outputs/*.txt)
-
-          if [ ${#FILES[@]} -eq 0 ]; then
-            echo "No output files found to commit."
+          if [ ! -d outputs ]; then
+            echo "No outputs directory found."
             exit 0
           fi
+
+          if ! ls outputs/*.txt >/dev/null 2>&1; then
+            echo "No output files found."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add outputs/*.txt
 
@@ -216,4 +423,3 @@ jobs:
           name: instagram-video-urls
           path: outputs/*.txt
           retention-days: 7
-
