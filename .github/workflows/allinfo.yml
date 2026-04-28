@@ -1,4 +1,4 @@
-name: Scrape TikTok Video IDs
+name: Scrape TikTok Video deatail IDs
 
 on:
   workflow_dispatch:
