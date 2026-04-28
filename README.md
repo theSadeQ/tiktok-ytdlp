@@ -1,20 +1,87 @@
 # TikTok Video ID Scraper
 
-This repository uses GitHub Actions and `yt-dlp` to safely and efficiently scrape all video IDs from a target TikTok profile. 
+This project uses GitHub Actions and `yt-dlp` to extract public video IDs from a TikTok profile.
 
-By utilizing `--flat-playlist`, this tool only fetches metadata without downloading video files, minimizing bandwidth and avoiding IP bans.
+It does not download videos. It only saves the video IDs to a text file.
 
-## How to Run the Scraper
+## Repository Structure
+```text
+tiktok-video-id-scraper/
+├── .github/
+│   └── workflows/
+│       └── tiktok-video-ids.yml
+├── requirements.txt
+├── README.md
+└── .gitignore
 
-1. Navigate to the **Actions** tab at the top of this GitHub repository.
-2. In the left sidebar, click on **Scrape TikTok Video IDs**.
-3. On the right side of the screen, click the **Run workflow** dropdown button.
-4. Enter the target TikTok username (e.g., `khaby.lame` or `@khaby.lame`).
-5. Click the green **Run workflow** button.
+## How It Works
 
-## How to Download the IDs
+The GitHub Action runs this command:
 
-1. Once the workflow finishes running (it will show a green checkmark), click on the run itself.
-2. Scroll down to the **Artifacts** section at the bottom of the page.
-3. You will see a downloadable `.zip` file named `tiktok-video-ids-[username]`.
-4. Extract the zip to find your `[username]_video_ids.txt` file containing the list of IDs.
+bash
+yt-dlp --flat-playlist --print id "https://www.tiktok.com/@USERNAME"
+
+This asks `yt-dlp` to read the TikTok profile as a playlist and print only the video IDs.
+
+## How to Use
+
+### 1. Open the Actions tab
+Go to your GitHub repository and click the **Actions** tab.
+
+### 2. Select the workflow
+Click **Scrape TikTok Video IDs**.
+
+### 3. Run the workflow
+Click **Run workflow** and enter a TikTok username.
+Supported input formats:
+*   `khaby.lame`
+*   `@khaby.lame`
+*   `https://www.tiktok.com/@khaby.lame`
+
+### 4. Download the result
+When the workflow finishes:
+1. Open the completed workflow run.
+2. Scroll to the **Artifacts** section.
+3. Download the artifact named `tiktok-video-ids`.
+
+Inside the downloaded ZIP file, you will find a text file like `khaby.lame_video_ids.txt`. Each line contains one video ID.
+
+## Turning IDs into URLs
+A TikTok video ID can usually be turned into a URL like this:
+`https://www.tiktok.com/@USERNAME/video/VIDEO_ID`
+
+## Notes and Limitations
+This project depends on `yt-dlp` and TikTok being accessible from GitHub Actions.
+Sometimes TikTok may block or rate-limit GitHub's shared IP addresses. If that happens, the workflow may fail even if the code is correct.
+
+Possible fixes:
+- run the workflow again later
+- update `yt-dlp`
+- test locally from your own machine
+- reduce how frequently you run the workflow
+
+
+---
+
+### 4. `.gitignore`
+
+Create this file in the project root:
+
+```gitignore
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated output files
+*_video_ids.txt
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
