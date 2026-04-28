@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "YouTube channel/handle/ID/URL (e.g. https://www.youtube.com/channel/UC8HOgNWipVorrlBH8oN2R-A or @handle or UC... )"
+        description: "YouTube channel/handle/URL (example: @MrBeast or https://youtube.com/@MrBeast)"
         required: true
         type: string
 
@@ -27,50 +27,43 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install yt-dlp
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install yt-dlp
 
-      # Normalize any form of input into a proper URL and a safe file name
       - name: Normalize channel input
         id: normalize
         shell: bash
         run: |
           RAW='${{ inputs.channel }}'
-          # Remove spaces/newlines
           CLEAN="$(printf '%s' "$RAW" | tr -d '[:space:]')"
 
-          # Case 1: already a URL (your example: https://www.youtube.com/channel/UC8HOgNWipVorrlBH8oN2R-A)
           if echo "$CLEAN" | grep -Eq '^https?://'; then
             URL="$CLEAN"
-
-          # Case 2: looks like a channel ID (UC + 22 chars)
-          elif echo "$CLEAN" | grep -Eq '^UC[0-9A-Za-z_-]{20,}$'; then
-            URL="https://www.youtube.com/channel/$CLEAN"
-
-          # Case 3: handle starting with @ (e.g. @MyChannel)
-          elif echo "$CLEAN" | grep -Eq '^@'; then
-            URL="https://www.youtube.com/$CLEAN"
-
-          # Case 4: plain name, treat as handle (MyChannel -> https://www.youtube.com/@MyChannel)
           else
-            URL="https://www.youtube.com/@$CLEAN"
+            if echo "$CLEAN" | grep -Eq '^UC[0-9A-Za-z_-]{20,}$'; then
+              URL="https://www.youtube.com/channel/$CLEAN"
+            else
+              if echo "$CLEAN" | grep -Eq '^@'; then
+                URL="https://www.youtube.com/$CLEAN"
+              else
+                URL="https://www.youtube.com/@$CLEAN"
+              fi
+            fi
           fi
-
-          echo "Resolved URL: $URL"
 
           SAFE="$(echo "$URL" | sed 's#https\?://##' | sed 's#[^A-Za-z0-9._-]#_#g')"
 
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "safe=$SAFE" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "safe=$SAFE" >> $GITHUB_OUTPUT
 
       - name: Create output directories
         run: |
           mkdir -p outputs
           mkdir -p outputs/thumbnails
 
-      # 1) Fast URL extraction
+      # 1️⃣ Fast URL extraction
       - name: Extract video URLs
         run: |
           yt-dlp \
@@ -78,17 +71,17 @@ jobs:
             --skip-download \
             --print "%(webpage_url)s" \
             "${{ steps.normalize.outputs.url }}" \
-            > "outputs/${{ steps.normalize.outputs.safe }}_video_urls.txt"
+            > outputs/${{ steps.normalize.outputs.safe }}_video_urls.txt
 
-      # 2) Full metadata JSON (one JSON object per line)
+      # 2️⃣ Full metadata JSON (one JSON per line)
       - name: Extract metadata JSON
         run: |
           yt-dlp \
             -j \
             "${{ steps.normalize.outputs.url }}" \
-            > "outputs/${{ steps.normalize.outputs.safe }}_metadata.json"
+            > outputs/${{ steps.normalize.outputs.safe }}_metadata.json
 
-      # 3) Thumbnails + per-video info JSON
+      # 3️⃣ Download thumbnails + info json per video
       - name: Download thumbnails and per-video metadata
         run: |
           yt-dlp \
@@ -107,7 +100,7 @@ jobs:
           git add outputs || true
 
           if git diff --cached --quiet; then
-            echo "No new files to commit"
+            echo "No new files"
             exit 0
           fi
 
